@@ -1,43 +1,10 @@
-"""
-Telegram-бот "До зустрічі" — лічильник днів + романтичні повідомлення.
-
-ЩО РОБИТЬ:
-- ☀️ Щоранку (час налаштовується) надсилає: "Доброго ранку" + скільки днів
-  залишилось + коротку цитату (щодня іншу, без повторів; в один день —
-  максимум одна цитата, навіть якщо повідомлення показане і кнопкою,
-  і автоматично).
-- Під ранковим повідомленням кнопка "💌 Показати ще раз" — будь-коли
-  протягом дня показує ТЕ САМЕ повідомлення (нову цитату дасть тільки
-  наступний ранок).
-- ❤️ Щодня о 12:00, 16:00 і 22:00 (час кожного налаштовується) — коротке
-  "Я тебе люблю ❤️".
-- 🥺 Додатково по суботах і неділях о 15:00 (час налаштовується) —
-  "Скучаю 🥺".
-- На 30-й і 60-й день від старту — окремі привітання (1 і 2 місяці).
-- Останні 10 днів до кінцевої дати — окремий "фінішний" текст щодня.
-- АДМІН керує геть усіма налаштуваннями (дата старту/кінця, часи
-  розсилок, часовий пояс) через inline-кнопки в Telegram — жодних
-  команд типу /setenddate не потрібно. Єдина команда в боті — /start.
-- 2 ролі за паролями: ADMIN (бачить кнопку налаштувань) і VIEWER
-  (тільки отримує повідомлення й тисне кнопку "Показати").
-
-=================== ЯК ЗАПУСТИТИ ===================
-1. pip install "python-telegram-bot[job-queue]" python-dotenv
-2. Заповни .env (BOT_TOKEN, ADMIN_PASSWORD, VIEWER_PASSWORD, і т.д.)
-3. python love_countdown_bot.py
-4. У Telegram напиши боту /start і натисни "🔑 Увійти", введи пароль
-   текстом (це єдине місце, де треба щось друкувати вручну).
-5. Якщо увійшов як адмін — з'явиться кнопка "⚙️ Налаштування", де
-   можна змінити все: дату кінця, час ранку, часи "я тебе люблю",
-   час "скучаю" по вихідних, часовий пояс.
-=====================================================
-"""
-
 import json
 import logging
 import os
 import random
+import threading
 from datetime import date, time, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -56,14 +23,14 @@ try:
 except ImportError:
     pass
 
-# ========================= ENV =========================
-
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 VIEWER_PASSWORD = os.getenv("VIEWER_PASSWORD", "")
 
 DEFAULT_START_DATE = os.getenv("START_DATE", "2026-08-16")
-DEFAULT_END_DATE = os.getenv("END_DATE", "")  # порожньо -> START_DATE + 90 днів
+DEFAULT_END_DATE = os.getenv("END_DATE", "")
+
+PORT = int(os.getenv("PORT", "10000"))
 
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_state.json")
 
@@ -74,8 +41,6 @@ if not BOT_TOKEN:
     raise SystemExit("Не задано BOT_TOKEN у .env")
 if not ADMIN_PASSWORD or not VIEWER_PASSWORD:
     raise SystemExit("Не задано ADMIN_PASSWORD і/або VIEWER_PASSWORD у .env")
-
-# ========================= ТЕКСТИ =========================
 
 ROMANTIC_MESSAGES = [
     "Кожен день без тебе — це день, який я рахую, щоб швидше обійняти тебе знову.",
@@ -211,7 +176,6 @@ FINAL_MESSAGE = (
 LOVE_MESSAGE = "Я тебе люблю ❤️"
 MISS_YOU_MESSAGE = "Скучаю 🥺"
 
-# ========================= СТАН =========================
 
 def default_state() -> dict:
     return {
@@ -227,13 +191,13 @@ def default_state() -> dict:
             "weekend_hour": 15, "weekend_minute": 0,
             "timezone": "Europe/Warsaw",
         },
-        "users": {},               # {"123456": {"role": "admin"}}
+        "users": {},
         "message_state": {
             "last_sent_date": None,
             "last_message": None,
             "used_indices": [],
         },
-        "pending": {},              # {"123456": {"action": "set_enddate"}}
+        "pending": {},
     }
 
 
@@ -277,8 +241,6 @@ def pick_romantic_message(message_state: dict) -> str:
     return ROMANTIC_MESSAGES[idx]
 
 
-# ========================= ЛОГІКА ДНІВ =========================
-
 def build_morning_text(state: dict) -> str:
     settings = state["settings"]
     start_dt = get_start_date(settings)
@@ -311,8 +273,6 @@ def build_morning_text(state: dict) -> str:
 
 
 def get_or_build_today_message(state: dict) -> str:
-    """Гарантує, що за день буде згенеровано і збережено тільки ОДНЕ повідомлення/цитату,
-    незалежно від того, хто його першим викликав — щоденна робота чи кнопка."""
     today_str = date.today().isoformat()
     ms = state["message_state"]
     if ms.get("last_sent_date") == today_str and ms.get("last_message"):
@@ -330,8 +290,6 @@ def build_show_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-# ========================= ДОСТУП / РОЛІ =========================
-
 def get_role(state: dict, chat_id: int):
     user = state["users"].get(str(chat_id))
     return user["role"] if user else None
@@ -340,8 +298,6 @@ def get_role(state: dict, chat_id: int):
 def is_admin(state: dict, chat_id: int) -> bool:
     return get_role(state, chat_id) == "admin"
 
-
-# ========================= РОЗСИЛКИ =========================
 
 async def broadcast(context: ContextTypes.DEFAULT_TYPE, text: str, keyboard: InlineKeyboardMarkup = None) -> None:
     state = load_state()
@@ -393,13 +349,11 @@ def reschedule_all_jobs(application: Application, state: dict) -> None:
     application.job_queue.run_daily(
         job_weekend,
         time=time(hour=settings["weekend_hour"], minute=settings["weekend_minute"], tzinfo=tz),
-        days=(5, 6),  # субота, неділя
+        days=(5, 6),
         name="weekend",
     )
     logger.info("Завдання переплановані.")
 
-
-# ========================= UI: МЕНЮ =========================
 
 def main_menu_keyboard(state: dict, chat_id: int) -> InlineKeyboardMarkup:
     role = get_role(state, chat_id)
@@ -470,14 +424,10 @@ async def send_main_menu(context, chat_id, state) -> None:
     await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=main_menu_keyboard(state, chat_id))
 
 
-# ========================= КОМАНДИ =========================
-
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     state = load_state()
     await send_main_menu(context, update.effective_chat.id, state)
 
-
-# ========================= ОБРОБКА PENDING TEXT-ІНПУТУ =========================
 
 PENDING_PROMPTS = {
     "login": "🔑 Введи пароль:",
@@ -508,7 +458,7 @@ async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     state = load_state()
     pending = state["pending"].get(str(chat_id))
     if not pending:
-        return  # звичайний текст без активного запиту — ігноруємо
+        return
 
     action = pending["action"]
     value = update.message.text.strip()
@@ -589,8 +539,6 @@ async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
-# ========================= CALLBACK-КНОПКИ =========================
-
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -622,7 +570,6 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await send_main_menu(context, chat_id, state)
         return
 
-    # --- усе нижче тільки для адміна ---
     if not is_admin(state, chat_id):
         await context.bot.send_message(chat_id=chat_id, text="⛔ Доступно тільки адміну.")
         return
@@ -662,9 +609,37 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
 
-# ========================= ЗАПУСК =========================
+class HealthHandler(BaseHTTPRequestHandler):
+    def _respond(self):
+        body = b'{"status":"ok"}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        self._respond()
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+
+    def log_message(self, format, *args):
+        return
+
+
+def start_health_server() -> None:
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    logger.info("Health-сервер запущено на порту %s", PORT)
+
 
 def main() -> None:
+    start_health_server()
+
     application = Application.builder().token(BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start_command))

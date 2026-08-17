@@ -1,41 +1,35 @@
 """
-Telegram-бот "До зустрічі" — щоденний лічильник днів + романтичне повідомлення.
+Telegram-бот "До зустрічі" — лічильник днів + романтичні повідомлення.
 
-Що робить:
-- Щодня о заданій годині сам надсилає всім, хто залогінився, повідомлення:
-  "День X з Y, залишилось днів: Z" + коротке романтичне повідомлення
-  (щодня інше, без повторів, поки список не закінчиться).
-- Під повідомленням кнопка: клік показує ЩЕ РАЗ те саме повідомлення
-  (того самого дня). Новий текст з'являється тільки наступного дня.
+ЩО РОБИТЬ:
+- ☀️ Щоранку (час налаштовується) надсилає: "Доброго ранку" + скільки днів
+  залишилось + коротку цитату (щодня іншу, без повторів; в один день —
+  максимум одна цитата, навіть якщо повідомлення показане і кнопкою,
+  і автоматично).
+- Під ранковим повідомленням кнопка "💌 Показати ще раз" — будь-коли
+  протягом дня показує ТЕ САМЕ повідомлення (нову цитату дасть тільки
+  наступний ранок).
+- ❤️ Щодня о 12:00, 16:00 і 22:00 (час кожного налаштовується) — коротке
+  "Я тебе люблю ❤️".
+- 🥺 Додатково по суботах і неділях о 15:00 (час налаштовується) —
+  "Скучаю 🥺".
 - На 30-й і 60-й день від старту — окремі привітання (1 і 2 місяці).
-- Останні 10 днів до кінцевої дати — кожного дня окремий "фінішний" текст.
-- У день кінцевої дати — фінальне повідомлення.
-- Є 2 ролі доступу за паролями:
-    VIEWER (viewer)  — тільки отримує повідомлення й може тиснути кнопку.
-    ADMIN  (admin)   — те саме + може змінювати дату кінця, час розсилки,
-                        часовий пояс і т.д. прямо командами в чаті.
+- Останні 10 днів до кінцевої дати — окремий "фінішний" текст щодня.
+- АДМІН керує геть усіма налаштуваннями (дата старту/кінця, часи
+  розсилок, часовий пояс) через inline-кнопки в Telegram — жодних
+  команд типу /setenddate не потрібно. Єдина команда в боті — /start.
+- 2 ролі за паролями: ADMIN (бачить кнопку налаштувань) і VIEWER
+  (тільки отримує повідомлення й тисне кнопку "Показати").
 
 =================== ЯК ЗАПУСТИТИ ===================
-1. Встанови залежності:
-       pip install "python-telegram-bot[job-queue]" python-dotenv
-
-2. Створи файл ".env" поруч зі скриптом (приклад — .env.example окремим
-   файлом) і заповни його своїми значеннями.
-
-3. Запусти бота:
-       python love_countdown_bot.py
-
-4. У Telegram кожен, хто хоче отримувати повідомлення, пише боту:
-       /login ПАРОЛЬ
-   Якщо пароль співпадає з VIEWER_PASSWORD — людина стає "viewer".
-   Якщо з ADMIN_PASSWORD — стає "admin" (і теж отримує повідомлення).
-
-5. Адмін може міняти параметри без зупинки бота, наприклад:
-       /setenddate 2026-10-15
-       /setsendtime 12:00
-       /settimezone Europe/Warsaw
-       /settings   — показати поточні налаштування
-       /help       — список команд
+1. pip install "python-telegram-bot[job-queue]" python-dotenv
+2. Заповни .env (BOT_TOKEN, ADMIN_PASSWORD, VIEWER_PASSWORD, і т.д.)
+3. python love_countdown_bot.py
+4. У Telegram напиши боту /start і натисни "🔑 Увійти", введи пароль
+   текстом (це єдине місце, де треба щось друкувати вручну).
+5. Якщо увійшов як адмін — з'явиться кнопка "⚙️ Налаштування", де
+   можна змінити все: дату кінця, час ранку, часи "я тебе люблю",
+   час "скучаю" по вихідних, часовий пояс.
 =====================================================
 """
 
@@ -52,25 +46,24 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    pass  # можна обійтись і без python-dotenv, якщо ENV задані іншим способом
+    pass
 
-# ========================= ENV / НАЛАШТУВАННЯ ЗА ЗАМОВЧУВАННЯМ =========================
+# ========================= ENV =========================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "")
 VIEWER_PASSWORD = os.getenv("VIEWER_PASSWORD", "")
 
-DEFAULT_START_DATE = os.getenv("START_DATE", "2026-08-16")   # YYYY-MM-DD
-DEFAULT_END_DATE = os.getenv("END_DATE", "")                  # YYYY-MM-DD, порожньо = START_DATE + 90 днів
-DEFAULT_SEND_HOUR = int(os.getenv("SEND_HOUR", "12"))
-DEFAULT_SEND_MINUTE = int(os.getenv("SEND_MINUTE", "0"))
-DEFAULT_TIMEZONE = os.getenv("TIMEZONE", "Europe/Warsaw")
+DEFAULT_START_DATE = os.getenv("START_DATE", "2026-08-16")
+DEFAULT_END_DATE = os.getenv("END_DATE", "")  # порожньо -> START_DATE + 90 днів
 
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_state.json")
 
@@ -194,13 +187,10 @@ MONTH_1_MESSAGE = (
     "🎉 Місяць позаду! Цілих 30 днів ми витримали цю відстань — "
     "і з кожним днем я люблю тебе тільки сильніше. Дякую, що чекаєш на мене."
 )
-
 MONTH_2_MESSAGE = (
     "🎊 Два місяці! 60 днів позаду — і це означає, що зустріч ближче, ніж будь-коли. "
     "Ти неймовірна, що витримуєш це разом зі мною."
 )
-
-# Останні 10 днів (index 0 = залишилось 10 днів, ..., index 9 = залишився 1 день)
 FINAL_WEEK_MESSAGES = [
     "🔥 10 днів до зустрічі! Це вже можна рахувати на пальцях однієї руки (майже).",
     "9 днів. Уявляю, як відкриються двері — і там ти.",
@@ -213,11 +203,13 @@ FINAL_WEEK_MESSAGES = [
     "2 дні. Завтра-післязавтра — і ми поруч. Затримай подих, майже прийшли.",
     "1 день!!! Завтра я тебе обійму. Спи спокійно — це остання ніч розлуки.",
 ]
-
 FINAL_MESSAGE = (
     "🏁 Всі дні позаду. Це було довго, але ми впорались. "
     "Дякую, що чекала, дякую, що вірила. Тепер — тільки ми, без кілометрів між нами. ❤️"
 )
+
+LOVE_MESSAGE = "Я тебе люблю ❤️"
+MISS_YOU_MESSAGE = "Скучаю 🥺"
 
 # ========================= СТАН =========================
 
@@ -225,17 +217,23 @@ def default_state() -> dict:
     return {
         "settings": {
             "start_date": DEFAULT_START_DATE,
-            "end_date": DEFAULT_END_DATE or None,  # None -> порахується як start+90
-            "send_hour": DEFAULT_SEND_HOUR,
-            "send_minute": DEFAULT_SEND_MINUTE,
-            "timezone": DEFAULT_TIMEZONE,
+            "end_date": DEFAULT_END_DATE or None,
+            "morning_hour": 9, "morning_minute": 0,
+            "love_times": [
+                {"hour": 12, "minute": 0},
+                {"hour": 16, "minute": 0},
+                {"hour": 22, "minute": 0},
+            ],
+            "weekend_hour": 15, "weekend_minute": 0,
+            "timezone": "Europe/Warsaw",
         },
-        "users": {},              # {"123456": {"role": "admin"}}
+        "users": {},               # {"123456": {"role": "admin"}}
         "message_state": {
             "last_sent_date": None,
             "last_message": None,
             "used_indices": [],
         },
+        "pending": {},              # {"123456": {"action": "set_enddate"}}
     }
 
 
@@ -247,6 +245,7 @@ def load_state() -> dict:
         base["settings"].update(state.get("settings", {}))
         base["users"].update(state.get("users", {}))
         base["message_state"].update(state.get("message_state", {}))
+        base["pending"].update(state.get("pending", {}))
         return base
     return default_state()
 
@@ -280,7 +279,7 @@ def pick_romantic_message(message_state: dict) -> str:
 
 # ========================= ЛОГІКА ДНІВ =========================
 
-def build_daily_text(state: dict) -> str:
+def build_morning_text(state: dict) -> str:
     settings = state["settings"]
     start_dt = get_start_date(settings)
     end_dt = get_end_date(settings)
@@ -291,7 +290,11 @@ def build_daily_text(state: dict) -> str:
     days_left = max((end_dt - today).days, 0)
     day_number = elapsed_days + 1
 
-    header = f"📅 День {day_number} з {total_days}\n⏳ Залишилось днів: {days_left}\n\n"
+    header = (
+        f"☀️ Доброго ранку!\n\n"
+        f"📅 День {day_number} з {total_days}\n"
+        f"⏳ Залишилось днів: {days_left}\n\n"
+    )
 
     if days_left == 0:
         body = FINAL_MESSAGE
@@ -307,7 +310,21 @@ def build_daily_text(state: dict) -> str:
     return header + body
 
 
-def build_keyboard() -> InlineKeyboardMarkup:
+def get_or_build_today_message(state: dict) -> str:
+    """Гарантує, що за день буде згенеровано і збережено тільки ОДНЕ повідомлення/цитату,
+    незалежно від того, хто його першим викликав — щоденна робота чи кнопка."""
+    today_str = date.today().isoformat()
+    ms = state["message_state"]
+    if ms.get("last_sent_date") == today_str and ms.get("last_message"):
+        return ms["last_message"]
+    text = build_morning_text(state)
+    ms["last_sent_date"] = today_str
+    ms["last_message"] = text
+    save_state(state)
+    return text
+
+
+def build_show_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [[InlineKeyboardButton("💌 Показати ще раз", callback_data="show_today")]]
     )
@@ -324,218 +341,325 @@ def is_admin(state: dict, chat_id: int) -> bool:
     return get_role(state, chat_id) == "admin"
 
 
-# ========================= ЩОДЕННА РОЗСИЛКА =========================
+# ========================= РОЗСИЛКИ =========================
 
-async def send_daily_message(context: ContextTypes.DEFAULT_TYPE) -> None:
+async def broadcast(context: ContextTypes.DEFAULT_TYPE, text: str, keyboard: InlineKeyboardMarkup = None) -> None:
     state = load_state()
     if not state["users"]:
-        logger.warning("Немає жодного залогіненого користувача — нікому слати.")
         return
-
-    text = build_daily_text(state)
-
     for chat_id in list(state["users"].keys()):
         try:
-            await context.bot.send_message(chat_id=int(chat_id), text=text, reply_markup=build_keyboard())
+            await context.bot.send_message(chat_id=int(chat_id), text=text, reply_markup=keyboard)
         except Exception as e:
-            logger.error("Не вдалось надіслати повідомлення %s: %s", chat_id, e)
-
-    state["message_state"]["last_sent_date"] = date.today().isoformat()
-    state["message_state"]["last_message"] = text
-    save_state(state)
+            logger.error("Не вдалось надіслати %s: %s", chat_id, e)
 
 
-def reschedule_daily_job(application: Application, state: dict) -> None:
-    for job in application.job_queue.get_jobs_by_name("daily_countdown"):
-        job.schedule_removal()
+async def job_morning(context: ContextTypes.DEFAULT_TYPE) -> None:
+    state = load_state()
+    text = get_or_build_today_message(state)
+    await broadcast(context, text, build_show_keyboard())
+
+
+async def job_love(context: ContextTypes.DEFAULT_TYPE) -> None:
+    await broadcast(context, LOVE_MESSAGE)
+
+
+async def job_weekend(context: ContextTypes.DEFAULT_TYPE) -> None:
+    await broadcast(context, MISS_YOU_MESSAGE)
+
+
+JOB_NAMES = ["morning", "love_0", "love_1", "love_2", "weekend"]
+
+
+def reschedule_all_jobs(application: Application, state: dict) -> None:
+    for name in JOB_NAMES:
+        for job in application.job_queue.get_jobs_by_name(name):
+            job.schedule_removal()
 
     settings = state["settings"]
     tz = ZoneInfo(settings["timezone"])
+
     application.job_queue.run_daily(
-        send_daily_message,
-        time=time(hour=settings["send_hour"], minute=settings["send_minute"], tzinfo=tz),
-        name="daily_countdown",
+        job_morning,
+        time=time(hour=settings["morning_hour"], minute=settings["morning_minute"], tzinfo=tz),
+        name="morning",
     )
-    logger.info(
-        "Розсилка запланована на %02d:%02d (%s)",
-        settings["send_hour"], settings["send_minute"], settings["timezone"],
+    for i, lt in enumerate(settings["love_times"]):
+        application.job_queue.run_daily(
+            job_love,
+            time=time(hour=lt["hour"], minute=lt["minute"], tzinfo=tz),
+            name=f"love_{i}",
+        )
+    application.job_queue.run_daily(
+        job_weekend,
+        time=time(hour=settings["weekend_hour"], minute=settings["weekend_minute"], tzinfo=tz),
+        days=(5, 6),  # субота, неділя
+        name="weekend",
     )
+    logger.info("Завдання переплановані.")
+
+
+# ========================= UI: МЕНЮ =========================
+
+def main_menu_keyboard(state: dict, chat_id: int) -> InlineKeyboardMarkup:
+    role = get_role(state, chat_id)
+    rows = []
+    if role is None:
+        rows.append([InlineKeyboardButton("🔑 Увійти", callback_data="login")])
+    else:
+        rows.append([InlineKeyboardButton("💌 Показати", callback_data="show_today")])
+        if role == "admin":
+            rows.append([InlineKeyboardButton("⚙️ Налаштування", callback_data="adm_menu")])
+    return InlineKeyboardMarkup(rows)
+
+
+def admin_menu_text(state: dict) -> str:
+    s = state["settings"]
+    start_dt = get_start_date(s)
+    end_dt = get_end_date(s)
+    love_str = ", ".join(f"{t['hour']:02d}:{t['minute']:02d}" for t in s["love_times"])
+    return (
+        "⚙️ Налаштування бота\n\n"
+        f"Старт: {start_dt.isoformat()}\n"
+        f"Кінець: {end_dt.isoformat()} (всього днів: {(end_dt - start_dt).days})\n"
+        f"Ранкове повідомлення: {s['morning_hour']:02d}:{s['morning_minute']:02d}\n"
+        f"«Я тебе люблю»: {love_str}\n"
+        f"«Скучаю» (сб/нд): {s['weekend_hour']:02d}:{s['weekend_minute']:02d}\n"
+        f"Часовий пояс: {s['timezone']}\n\n"
+        "Що змінити?"
+    )
+
+
+def admin_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📅 Дата старту", callback_data="adm_set_startdate")],
+        [InlineKeyboardButton("📅 Кінцева дата", callback_data="adm_set_enddate")],
+        [InlineKeyboardButton("☀️ Час ранкового повідомлення", callback_data="adm_set_morning")],
+        [InlineKeyboardButton("❤️ Часи 'Я тебе люблю'", callback_data="adm_love_menu")],
+        [InlineKeyboardButton("🥺 Час 'Скучаю' (сб/нд)", callback_data="adm_set_weekend")],
+        [InlineKeyboardButton("🌍 Часовий пояс", callback_data="adm_set_timezone")],
+        [InlineKeyboardButton("👥 Користувачі", callback_data="adm_users")],
+        [InlineKeyboardButton("⬅️ Назад", callback_data="back_main")],
+    ])
+
+
+def love_menu_keyboard(state: dict) -> InlineKeyboardMarkup:
+    s = state["settings"]
+    rows = []
+    for i, t in enumerate(s["love_times"]):
+        rows.append([InlineKeyboardButton(
+            f"Час {i + 1}: {t['hour']:02d}:{t['minute']:02d}",
+            callback_data=f"adm_set_love_{i}"
+        )])
+    rows.append([InlineKeyboardButton("⬅️ Назад", callback_data="adm_menu")])
+    return InlineKeyboardMarkup(rows)
+
+
+def cancel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("❌ Скасувати", callback_data="cancel_input")]])
+
+
+async def send_main_menu(context, chat_id, state) -> None:
+    role = get_role(state, chat_id)
+    if role is None:
+        text = "Привіт! 💛\nЩоб отримувати повідомлення, увійди за паролем."
+    elif role == "admin":
+        text = "Привіт, адміне 👋"
+    else:
+        text = "Привіт 💛"
+    await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=main_menu_keyboard(state, chat_id))
 
 
 # ========================= КОМАНДИ =========================
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "Привіт! 💛\nЩоб отримувати щоденні повідомлення, введи:\n/login ПАРОЛЬ"
-    )
-
-
-async def login_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    if not context.args:
-        await update.message.reply_text("Введи пароль так: /login ПАРОЛЬ")
-        return
-
-    password = context.args[0]
     state = load_state()
-
-    if password == ADMIN_PASSWORD:
-        role = "admin"
-    elif password == VIEWER_PASSWORD:
-        role = "viewer"
-    else:
-        await update.message.reply_text("❌ Невірний пароль.")
-        return
-
-    state["users"][str(chat_id)] = {"role": role}
-    save_state(state)
-
-    if role == "admin":
-        await update.message.reply_text(
-            "✅ Вхід виконано як ADMIN. Ти отримуватимеш повідомлення і можеш "
-            "змінювати налаштування.\nНабери /help, щоб побачити команди."
-        )
-    else:
-        await update.message.reply_text("✅ Вхід виконано. Тепер ти отримуватимеш щоденні повідомлення 💛")
+    await send_main_menu(context, update.effective_chat.id, state)
 
 
-async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    state = load_state()
-    role = get_role(state, update.effective_chat.id)
-    await update.message.reply_text(f"Твоя роль: {role or 'не залогінений'}")
+# ========================= ОБРОБКА PENDING TEXT-ІНПУТУ =========================
+
+PENDING_PROMPTS = {
+    "login": "🔑 Введи пароль:",
+    "set_startdate": "Введи нову дату старту у форматі РРРР-ММ-ДД (наприклад 2026-08-16):",
+    "set_enddate": "Введи нову кінцеву дату у форматі РРРР-ММ-ДД (наприклад 2026-11-14):",
+    "set_morning": "Введи новий час ранкового повідомлення у форматі ГГ:ХХ (наприклад 09:00):",
+    "set_weekend": "Введи новий час повідомлення «Скучаю» у форматі ГГ:ХХ (наприклад 15:00):",
+    "set_timezone": "Введи новий часовий пояс (наприклад Europe/Warsaw):",
+    "set_love_0": "Введи новий час 1-го «Я тебе люблю» у форматі ГГ:ХХ:",
+    "set_love_1": "Введи новий час 2-го «Я тебе люблю» у форматі ГГ:ХХ:",
+    "set_love_2": "Введи новий час 3-го «Я тебе люблю» у форматі ГГ:ХХ:",
+}
 
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    state = load_state()
-    text = (
-        "/login ПАРОЛЬ — увійти й почати отримувати повідомлення\n"
-        "/whoami — показати свою роль\n"
-        "/settings — показати поточні налаштування\n"
-    )
-    if is_admin(state, update.effective_chat.id):
-        text += (
-            "\nАдмін-команди:\n"
-            "/setenddate YYYY-MM-DD — задати кінцеву дату (наприклад /setenddate 2026-10-15)\n"
-            "/setstartdate YYYY-MM-DD — задати дату старту\n"
-            "/setsendtime HH:MM — час щоденної розсилки\n"
-            "/settimezone Регіон/Місто — часовий пояс (наприклад Europe/Warsaw)\n"
-        )
-    await update.message.reply_text(text)
-
-
-async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    state = load_state()
-    settings = state["settings"]
-    start_dt = get_start_date(settings)
-    end_dt = get_end_date(settings)
-    await update.message.reply_text(
-        "⚙️ Поточні налаштування:\n"
-        f"Старт: {start_dt.isoformat()}\n"
-        f"Кінець: {end_dt.isoformat()}\n"
-        f"Усього днів: {(end_dt - start_dt).days}\n"
-        f"Час розсилки: {settings['send_hour']:02d}:{settings['send_minute']:02d}\n"
-        f"Часовий пояс: {settings['timezone']}"
-    )
-
-
-def admin_only(handler):
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        state = load_state()
-        if not is_admin(state, update.effective_chat.id):
-            await update.message.reply_text("⛔ Ця команда доступна тільки адміну.")
-            return
-        await handler(update, context, state)
-    return wrapper
-
-
-@admin_only
-async def setenddate_command(update: Update, context: ContextTypes.DEFAULT_TYPE, state: dict) -> None:
-    if not context.args:
-        await update.message.reply_text("Формат: /setenddate 2026-10-15")
-        return
+def parse_time_str(value: str):
     try:
-        new_date = date.fromisoformat(context.args[0])
-    except ValueError:
-        await update.message.reply_text("Невірний формат дати. Приклад: 2026-10-15")
-        return
-    state["settings"]["end_date"] = new_date.isoformat()
-    save_state(state)
-    await update.message.reply_text(f"✅ Кінцева дата оновлена: {new_date.isoformat()}")
-
-
-@admin_only
-async def setstartdate_command(update: Update, context: ContextTypes.DEFAULT_TYPE, state: dict) -> None:
-    if not context.args:
-        await update.message.reply_text("Формат: /setstartdate 2026-08-16")
-        return
-    try:
-        new_date = date.fromisoformat(context.args[0])
-    except ValueError:
-        await update.message.reply_text("Невірний формат дати. Приклад: 2026-08-16")
-        return
-    state["settings"]["start_date"] = new_date.isoformat()
-    save_state(state)
-    await update.message.reply_text(f"✅ Дата старту оновлена: {new_date.isoformat()}")
-
-
-@admin_only
-async def setsendtime_command(update: Update, context: ContextTypes.DEFAULT_TYPE, state: dict) -> None:
-    if not context.args:
-        await update.message.reply_text("Формат: /setsendtime 12:00")
-        return
-    try:
-        hour_str, minute_str = context.args[0].split(":")
-        hour, minute = int(hour_str), int(minute_str)
-        assert 0 <= hour <= 23 and 0 <= minute <= 59
+        h_str, m_str = value.strip().split(":")
+        h, m = int(h_str), int(m_str)
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            return h, m
     except Exception:
-        await update.message.reply_text("Невірний формат часу. Приклад: 12:00")
+        pass
+    return None
+
+
+async def text_input_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    state = load_state()
+    pending = state["pending"].get(str(chat_id))
+    if not pending:
+        return  # звичайний текст без активного запиту — ігноруємо
+
+    action = pending["action"]
+    value = update.message.text.strip()
+
+    if action == "login":
+        if value == ADMIN_PASSWORD:
+            role = "admin"
+        elif value == VIEWER_PASSWORD:
+            role = "viewer"
+        else:
+            await update.message.reply_text("❌ Невірний пароль. Спробуй ще раз або натисни /start.")
+            return
+        state["users"][str(chat_id)] = {"role": role}
+        state["pending"].pop(str(chat_id), None)
+        save_state(state)
+        await update.message.reply_text("✅ Вхід виконано!")
+        await send_main_menu(context, chat_id, state)
         return
-    state["settings"]["send_hour"] = hour
-    state["settings"]["send_minute"] = minute
-    save_state(state)
-    reschedule_daily_job(context.application, state)
-    await update.message.reply_text(f"✅ Час розсилки оновлено: {hour:02d}:{minute:02d}")
 
-
-@admin_only
-async def settimezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE, state: dict) -> None:
-    if not context.args:
-        await update.message.reply_text("Формат: /settimezone Europe/Warsaw")
+    if not is_admin(state, chat_id):
+        state["pending"].pop(str(chat_id), None)
+        save_state(state)
         return
-    tz_name = context.args[0]
-    try:
-        ZoneInfo(tz_name)
-    except ZoneInfoNotFoundError:
-        await update.message.reply_text("Невідомий часовий пояс. Приклад: Europe/Warsaw")
-        return
-    state["settings"]["timezone"] = tz_name
-    save_state(state)
-    reschedule_daily_job(context.application, state)
-    await update.message.reply_text(f"✅ Часовий пояс оновлено: {tz_name}")
+
+    if action in ("set_startdate", "set_enddate"):
+        try:
+            new_date = date.fromisoformat(value)
+        except ValueError:
+            await update.message.reply_text("Невірний формат. Приклад: 2026-11-14", reply_markup=cancel_keyboard())
+            return
+        key = "start_date" if action == "set_startdate" else "end_date"
+        state["settings"][key] = new_date.isoformat()
+        state["pending"].pop(str(chat_id), None)
+        save_state(state)
+        await update.message.reply_text(f"✅ Оновлено: {new_date.isoformat()}")
+
+    elif action == "set_timezone":
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError:
+            await update.message.reply_text("Невідомий часовий пояс. Приклад: Europe/Warsaw", reply_markup=cancel_keyboard())
+            return
+        state["settings"]["timezone"] = value
+        state["pending"].pop(str(chat_id), None)
+        save_state(state)
+        reschedule_all_jobs(context.application, state)
+        await update.message.reply_text(f"✅ Часовий пояс оновлено: {value}")
+
+    elif action in ("set_morning", "set_weekend"):
+        parsed = parse_time_str(value)
+        if not parsed:
+            await update.message.reply_text("Невірний формат. Приклад: 09:00", reply_markup=cancel_keyboard())
+            return
+        h, m = parsed
+        prefix = "morning" if action == "set_morning" else "weekend"
+        state["settings"][f"{prefix}_hour"] = h
+        state["settings"][f"{prefix}_minute"] = m
+        state["pending"].pop(str(chat_id), None)
+        save_state(state)
+        reschedule_all_jobs(context.application, state)
+        await update.message.reply_text(f"✅ Час оновлено: {h:02d}:{m:02d}")
+
+    elif action.startswith("set_love_"):
+        idx = int(action.split("_")[-1])
+        parsed = parse_time_str(value)
+        if not parsed:
+            await update.message.reply_text("Невірний формат. Приклад: 12:00", reply_markup=cancel_keyboard())
+            return
+        h, m = parsed
+        state["settings"]["love_times"][idx] = {"hour": h, "minute": m}
+        state["pending"].pop(str(chat_id), None)
+        save_state(state)
+        reschedule_all_jobs(context.application, state)
+        await update.message.reply_text(f"✅ Час {idx + 1} оновлено: {h:02d}:{m:02d}")
+
+    await context.bot.send_message(
+        chat_id=chat_id, text=admin_menu_text(state), reply_markup=admin_menu_keyboard()
+    )
 
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# ========================= CALLBACK-КНОПКИ =========================
+
+async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-
-    state = load_state()
     chat_id = query.message.chat_id
-    if get_role(state, chat_id) is None:
-        await context.bot.send_message(chat_id=chat_id, text="Спочатку увійди: /login ПАРОЛЬ")
+    data = query.data
+    state = load_state()
+
+    if data == "show_today":
+        if get_role(state, chat_id) is None:
+            await context.bot.send_message(chat_id=chat_id, text="Спочатку увійди 🔑", reply_markup=main_menu_keyboard(state, chat_id))
+            return
+        text = get_or_build_today_message(state)
+        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=build_show_keyboard())
         return
 
-    today_str = date.today().isoformat()
-    ms = state["message_state"]
-
-    if ms.get("last_sent_date") == today_str and ms.get("last_message"):
-        text = ms["last_message"]
-    else:
-        text = build_daily_text(state)
-        ms["last_sent_date"] = today_str
-        ms["last_message"] = text
+    if data == "login":
+        state["pending"][str(chat_id)] = {"action": "login"}
         save_state(state)
+        await context.bot.send_message(chat_id=chat_id, text=PENDING_PROMPTS["login"], reply_markup=cancel_keyboard())
+        return
 
-    await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=build_keyboard())
+    if data == "back_main":
+        await send_main_menu(context, chat_id, state)
+        return
+
+    if data == "cancel_input":
+        state["pending"].pop(str(chat_id), None)
+        save_state(state)
+        await send_main_menu(context, chat_id, state)
+        return
+
+    # --- усе нижче тільки для адміна ---
+    if not is_admin(state, chat_id):
+        await context.bot.send_message(chat_id=chat_id, text="⛔ Доступно тільки адміну.")
+        return
+
+    if data == "adm_menu":
+        await context.bot.send_message(chat_id=chat_id, text=admin_menu_text(state), reply_markup=admin_menu_keyboard())
+        return
+
+    if data == "adm_love_menu":
+        await context.bot.send_message(chat_id=chat_id, text="❤️ Обери, який час змінити:", reply_markup=love_menu_keyboard(state))
+        return
+
+    if data == "adm_users":
+        if not state["users"]:
+            text = "Поки що ніхто не залогінився."
+        else:
+            lines = [f"• {cid} — {info['role']}" for cid, info in state["users"].items()]
+            text = "👥 Користувачі:\n" + "\n".join(lines)
+        await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=admin_menu_keyboard())
+        return
+
+    action_map = {
+        "adm_set_startdate": "set_startdate",
+        "adm_set_enddate": "set_enddate",
+        "adm_set_morning": "set_morning",
+        "adm_set_weekend": "set_weekend",
+        "adm_set_timezone": "set_timezone",
+        "adm_set_love_0": "set_love_0",
+        "adm_set_love_1": "set_love_1",
+        "adm_set_love_2": "set_love_2",
+    }
+    if data in action_map:
+        action = action_map[data]
+        state["pending"][str(chat_id)] = {"action": action}
+        save_state(state)
+        await context.bot.send_message(chat_id=chat_id, text=PENDING_PROMPTS[action], reply_markup=cancel_keyboard())
+        return
 
 
 # ========================= ЗАПУСК =========================
@@ -544,18 +668,11 @@ def main() -> None:
     application = Application.builder().token(BOT_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("login", login_command))
-    application.add_handler(CommandHandler("whoami", whoami_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("settings", settings_command))
-    application.add_handler(CommandHandler("setenddate", setenddate_command))
-    application.add_handler(CommandHandler("setstartdate", setstartdate_command))
-    application.add_handler(CommandHandler("setsendtime", setsendtime_command))
-    application.add_handler(CommandHandler("settimezone", settimezone_command))
-    application.add_handler(CallbackQueryHandler(button_handler, pattern="^show_today$"))
+    application.add_handler(CallbackQueryHandler(callback_router))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_input_handler))
 
     state = load_state()
-    reschedule_daily_job(application, state)
+    reschedule_all_jobs(application, state)
 
     logger.info("Бот запущений.")
     application.run_polling()
